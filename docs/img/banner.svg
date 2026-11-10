@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-label="Corundum HFT by Euclase">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0F2933"/>
+      <stop offset="1" stop-color="#0A1F27"/>
+    </linearGradient>
+    <linearGradient id="gem" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#99F6E4"/>
+      <stop offset="1" stop-color="#2DD4BF"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="320" fill="url(#bg)"/>
+  <!-- ring buffer: 16 slots around a circle, head and tail marked -->
+  <g transform="translate(190 160)" fill="none" stroke-width="18">
+    <circle r="92" stroke="#1B4556"/>
+    <path d="M 0 -92 A 92 92 0 0 1 86.5 31.4" stroke="url(#gem)" stroke-linecap="butt"/>
+    <g stroke="#0F2933" stroke-width="3">
+      <line x1="0" y1="-82" x2="0" y2="-102"/><line x1="35.2" y1="-85" x2="39" y2="-94.2"/>
+      <line x1="58" y1="-58" x2="72.1" y2="-72.1"/><line x1="85" y1="-35.2" x2="94.2" y2="-39"/>
+      <line x1="82" y1="0" x2="102" y2="0"/><line x1="85" y1="35.2" x2="94.2" y2="39"/>
+      <line x1="58" y1="58" x2="72.1" y2="72.1"/><line x1="35.2" y1="85" x2="39" y2="94.2"/>
+      <line x1="0" y1="82" x2="0" y2="102"/><line x1="-35.2" y1="85" x2="-39" y2="94.2"/>
+      <line x1="-58" y1="58" x2="-72.1" y2="72.1"/><line x1="-85" y1="35.2" x2="-94.2" y2="39"/>
+      <line x1="-82" y1="0" x2="-102" y2="0"/><line x1="-85" y1="-35.2" x2="-94.2" y2="-39"/>
+      <line x1="-58" y1="-58" x2="-72.1" y2="-72.1"/><line x1="-35.2" y1="-85" x2="-39" y2="-94.2"/>
+    </g>
+    <!-- corundum crystal (hexagonal) in the centre -->
+    <polygon points="0,-46 40,-23 40,23 0,46 -40,23 -40,-23" fill="url(#gem)" stroke="none"/>
+    <polygon points="0,-46 40,-23 0,0 -40,-23" fill="#F8FAFC" fill-opacity=".35" stroke="none"/>
+    <polygon points="0,0 40,23 0,46" fill="#0F2933" fill-opacity=".18" stroke="none"/>
+  </g>
+  <g font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif">
+    <text x="340" y="150" fill="#F8FAFC" font-size="72" font-weight="700" letter-spacing="-1">Corundum <tspan fill="#2DD4BF">HFT</tspan></text>
+    <text x="344" y="200" fill="#8FB3BC" font-size="26">Zero-copy lock-free IPC ring buffer over POSIX shared memory</text>
+    <text x="344" y="248" fill="#2DD4BF" font-size="18" font-weight="600" letter-spacing="5">BY EUCLASE</text>
+  </g>
+</svg>

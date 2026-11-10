@@ -1,0 +1,87 @@
+cmake_minimum_required(VERSION 3.16)
+project(Corundum VERSION 1.0.0 LANGUAGES C CXX
+        DESCRIPTION "Corundum HFT by Euclase: zero-copy lock-free IPC ring buffer over POSIX shared memory")
+
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  message(FATAL_ERROR "Corundum targets Linux (POSIX shared memory + futex)")
+endif()
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+option(CORUNDUM_BUILD_TESTS "Build tests" ON)
+option(CORUNDUM_BUILD_BENCH "Build the benchmark" ON)
+option(CORUNDUM_BUILD_EXAMPLES "Build the examples and tools" ON)
+option(CORUNDUM_WERROR "Treat warnings as errors" OFF)
+
+set(CORUNDUM_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion)
+if(CORUNDUM_WERROR)
+  list(APPEND CORUNDUM_WARNINGS -Werror)
+endif()
+
+include(GNUInstallDirs)
+
+add_library(corundum STATIC src/corundum.c)
+add_library(Corundum::corundum ALIAS corundum)
+target_include_directories(corundum PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+target_compile_options(corundum PRIVATE ${CORUNDUM_WARNINGS})
+set_target_properties(corundum PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# shm_open lives in librt on glibc < 2.34
+include(CheckLibraryExists)
+check_library_exists(rt shm_open "" CORUNDUM_HAVE_LIBRT)
+if(CORUNDUM_HAVE_LIBRT)
+  target_link_libraries(corundum PUBLIC rt)
+endif()
+
+if(CORUNDUM_BUILD_TESTS)
+  enable_testing()
+  find_package(Threads REQUIRED)
+  foreach(t test_ring test_ipc)
+    add_executable(${t} tests/${t}.c)
+    target_link_libraries(${t} PRIVATE corundum)
+    target_compile_options(${t} PRIVATE ${CORUNDUM_WARNINGS})
+    add_test(NAME ${t} COMMAND ${t})
+  endforeach()
+  add_executable(test_cpp tests/test_cpp.cpp)
+  target_link_libraries(test_cpp PRIVATE corundum Threads::Threads)
+  target_compile_options(test_cpp PRIVATE ${CORUNDUM_WARNINGS})
+  add_test(NAME test_cpp COMMAND test_cpp)
+  set_tests_properties(test_ring test_ipc test_cpp PROPERTIES TIMEOUT 120)
+endif()
+
+if(CORUNDUM_BUILD_BENCH)
+  add_executable(corundum-bench bench/corundum_bench.c)
+  target_link_libraries(corundum-bench PRIVATE corundum)
+  target_compile_options(corundum-bench PRIVATE ${CORUNDUM_WARNINGS})
+endif()
+
+if(CORUNDUM_BUILD_EXAMPLES)
+  add_executable(telemetry_daemon examples/telemetry_daemon.c)
+  target_link_libraries(telemetry_daemon PRIVATE corundum)
+  add_executable(telemetry_viewer examples/telemetry_viewer.cpp)
+  target_link_libraries(telemetry_viewer PRIVATE corundum)
+  add_executable(corundum-inspect tools/corundum_inspect.c)
+  target_link_libraries(corundum-inspect PRIVATE corundum)
+  foreach(t telemetry_daemon telemetry_viewer corundum-inspect)
+    target_compile_options(${t} PRIVATE ${CORUNDUM_WARNINGS})
+  endforeach()
+  install(TARGETS corundum-inspect RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+install(TARGETS corundum EXPORT CorundumTargets ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(DIRECTORY include/corundum DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(EXPORT CorundumTargets NAMESPACE Corundum:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Corundum)
+include(CMakePackageConfigHelpers)
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/CorundumConfig.cmake
+  "include(\"\${CMAKE_CURRENT_LIST_DIR}/CorundumTargets.cmake\")\n")
+write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/CorundumConfigVersion.cmake
+  COMPATIBILITY SameMajorVersion)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/CorundumConfig.cmake ${CMAKE_CURRENT_BINARY_DIR}/CorundumConfigVersion.cmake
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Corundum)

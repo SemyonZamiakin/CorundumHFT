@@ -1,0 +1,31 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected and what you saw instead.
+    validations: {required: true}
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations: {required: true}
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag or commit hash.
+    validations: {required: true}
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Distribution, kernel (uname -r), CPU, compiler and version.
+    validations: {required: true}
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
