@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.0 (2026-11-12)
+
+- **Windows support.** Same API and the same inline hot path; the platform layer uses a named pagefile-backed file mapping (`Local\corundum.<name>`) and a named auto-reset event for `crd_wait` / `crd_notify`. Builds with MinGW-w64 GCC (and Clang).
+- `corundum-bench` for Windows, comparing against an anonymous pipe. Median one-way latency 74 ns vs 6.7 µs on an i9-9900K.
+- The test suite runs on Windows too (child processes are started with `CreateProcess` instead of `fork`); CI gained a Windows job.
+- `crd_writer` / `crd_reader` have a new process-local field (`os_event`). The shared layout is unchanged (`CRD_LAYOUT_VERSION` stays 1), so 1.0 and 1.1 processes on Linux interoperate.
+- Used by Euclase Monitor 1.1 (publishes metrics) and Euclase Light 1.1 (reads them).
+
 ## 1.0.0 (2026-11-10)
 
 First release.

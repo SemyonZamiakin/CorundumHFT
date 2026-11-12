@@ -31,7 +31,7 @@
   </g>
   <g font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif">
     <text x="340" y="150" fill="#F8FAFC" font-size="72" font-weight="700" letter-spacing="-1">Corundum <tspan fill="#2DD4BF">HFT</tspan></text>
-    <text x="344" y="200" fill="#8FB3BC" font-size="26">Zero-copy lock-free IPC ring buffer over POSIX shared memory</text>
+    <text x="344" y="200" fill="#8FB3BC" font-size="26">Zero-copy lock-free IPC ring buffer in shared memory · Linux &amp; Windows</text>
     <text x="344" y="248" fill="#2DD4BF" font-size="18" font-weight="600" letter-spacing="5">BY EUCLASE</text>
   </g>
 </svg>

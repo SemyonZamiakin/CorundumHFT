@@ -3,7 +3,7 @@
 <p align="center">
   <a href="https://github.com/SemyonZamiakin/CorundumHFT/actions/workflows/ci.yml"><img src="https://github.com/SemyonZamiakin/CorundumHFT/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/C11%20%2F%20C%2B%2B17-2DD4BF?labelColor=0F2933" alt="C11 / C++17">
-  <img src="https://img.shields.io/badge/Linux-x86--64%20%7C%20arm64-2DD4BF?labelColor=0F2933" alt="Linux x86-64 | arm64">
+  <img src="https://img.shields.io/badge/Linux%20%7C%20Windows-x86--64%20%7C%20arm64-2DD4BF?labelColor=0F2933" alt="Linux | Windows">
   <img src="https://img.shields.io/badge/license-MIT-2DD4BF?labelColor=0F2933" alt="MIT">
 </p>
 
@@ -11,9 +11,9 @@
 
 # Corundum HFT
 
-A zero-copy, lock-free ring buffer in POSIX shared memory for passing high-frequency telemetry between Linux processes, for example from a background monitoring daemon to a GUI.
+A zero-copy, lock-free ring buffer in shared memory for passing high-frequency telemetry between processes on **Linux and Windows**, for example from a background monitoring daemon to a GUI.
 
-Pipes and sockets copy every message into the kernel and back out, and each transfer is a system call. Corundum places a single-producer / single-consumer ring in a `shm_open` segment that both processes map. The writer builds a message directly in shared memory, the reader uses it in place, and the two coordinate through one acquire load and one release store per side. Sending and receiving makes no system calls and allocates no memory.
+Pipes and sockets copy every message into the kernel and back out, and each transfer is a system call. Corundum places a single-producer / single-consumer ring in a shared-memory segment that both processes map (Linux: `shm_open`; Windows: a named file mapping). The writer builds a message directly in shared memory, the reader uses it in place, and the two coordinate through one acquire load and one release store per side. Sending and receiving makes no system calls and allocates no memory.
 
 ## Features
 
@@ -21,7 +21,8 @@ Pipes and sockets copy every message into the kernel and back out, and each tran
 - **No syscalls, locks or heap on the hot path.** The hot path is a handful of inline functions in the header. The library never calls `malloc`, not even during setup: handles are plain structs you place anywhere.
 - **Variable-size records** up to half the ring capacity, 8-byte aligned, each with a 32-bit user type. A record never wraps around the end of the buffer, so it is always one contiguous block.
 - **Batching on both sides:** stage several records and publish once, read several records and release once.
-- **Optional blocking.** `crd_wait` sleeps on a futex while the ring is empty. `crd_notify` costs one memory fence and enters the kernel only if the reader is actually asleep.
+- **Linux and Windows, one API.** The hot path is the same code on both; only setup and sleeping differ (POSIX shm + futex on Linux, named file mapping + event on Windows).
+- **Optional blocking.** `crd_wait` sleeps on a futex (Windows: an event) while the ring is empty. `crd_notify` costs one memory fence and enters the kernel only if the reader is actually asleep.
 - **Robust against the peer.** The reader validates every record header, so a buggy or hostile writer cannot make it read outside the mapping. A crashed writer's slot is reclaimed automatically, and data it published stays readable.
 - **C and C++.** A C11 core, plus a C++17 header with RAII endpoints, typed writes, in-place construction (`try_emplace<T>`) and typed zero-copy reads (`msg.as<T>()`).
 - **Tooling:** `corundum-inspect` shows a ring's fill level and who is attached; `corundum-bench` compares against a pipe and a Unix socket on your machine.
@@ -71,7 +72,9 @@ while (r.try_read(m))
 r.release();
 ```
 
-A complete daemon / viewer pair that streams per-core CPU load at 1 kHz is in [examples/](examples/).
+A complete daemon / viewer pair that streams per-core CPU load at 1 kHz is in [examples/](examples/) (Linux).
+
+**Used in production by** [Euclase Monitor](https://github.com/SemyonZamiakin/EuclaseMonitor) 1.1, which publishes its metrics on a Corundum ring, and [Euclase Light](https://github.com/SemyonZamiakin/EuclaseLight) 1.1, whose "colour follows system load" mode reads them.
 
 ## API at a glance
 
@@ -95,7 +98,26 @@ All functions return a `crd_status`; negative values are errors and `crd_strerro
 
 `corundum-bench` runs every test between two processes pinned to separate cores. Latency is a 64-byte ping-pong (one-way = round trip / 2). Throughput is a one-way stream in which the producer writes every byte and the consumer touches every cache line.
 
-Measured on an Intel Core i9-9900K under **WSL2** (Ubuntu, kernel 6.18, GCC 15, Release build `-O3`), `corundum-bench all -n 1000000 -c 2,4`:
+### Windows 11, bare metal
+
+Intel Core i9-9900K, Windows 11, MinGW-w64 GCC 15, Release build, `corundum-bench all -n 1000000 -c 2,4`. The comparison is an anonymous pipe (`CreatePipe`):
+
+| One-way latency, 64 B | p50 | p99 | p99.9 |
+|---|---:|---:|---:|
+| Corundum | 74 ns | 114 ns | 126 ns |
+| pipe | 6.7 µs | 10.6 µs | 38.7 µs |
+
+| Throughput | 16 B | 64 B | 256 B | 1 KiB | 4 KiB |
+|---|---:|---:|---:|---:|---:|
+| Corundum, M msg/s | 165 | 193 | 93 | 25.5 | 6.0 |
+| Corundum, GB/s | 2.7 | 12.3 | 23.8 | 26.2 | 24.6 |
+| pipe, GB/s | 0.01 | 0.05 | 0.21 | 0.44 | 1.4 |
+
+Median latency is about 90 times lower than the pipe's; throughput for 64-byte messages is about 230 times higher.
+
+### Linux (WSL2)
+
+Measured on the same i9-9900K under **WSL2** (Ubuntu, kernel 6.18, GCC 15, Release build `-O3`), `corundum-bench all -n 1000000 -c 2,4`:
 
 | One-way latency, 64 B | p50 | p99 | p99.9 |
 |---|---:|---:|---:|
@@ -122,12 +144,12 @@ How to read these numbers:
 - **Records are delivered in order, complete and exactly once** while both processes are alive. A record is visible to the reader only after it is committed in full. If the reader crashes, records it read but did not release are delivered again to the next reader.
 - **The writer never blocks.** If the reader falls behind, `crd_reserve` returns `CRD_FULL` and the writer decides whether to drop, retry or buffer. This suits telemetry, where fresh data matters more than old data.
 - **Shared memory is shared.** The reader validates record headers, but payload bytes stay writable by the writer. If you do not trust the writer, copy the payload before validating it. See [SECURITY.md](SECURITY.md).
-- **Both processes must use the same ABI:** 64-bit Linux, GCC or Clang, and the same Corundum layout version (checked when attaching).
-- **Not a persistence layer.** A segment lives in RAM (`/dev/shm`) until `crd_unlink` or reboot.
+- **Both processes must use the same ABI:** 64-bit, GCC or Clang (MinGW-w64 on Windows), and the same Corundum layout version (checked when attaching).
+- **Not a persistence layer.** On Linux a segment lives in RAM (`/dev/shm`) until `crd_unlink` or reboot. On Windows the mapping `Local\corundum.<name>` belongs to the current logon session and exists while any process has it open; the creating process keeps it alive until `crd_unlink` or exit.
 
 ## Building
 
-Requirements: Linux, CMake 3.16+, GCC or Clang (tested in CI with GCC 11, 13 and Clang 18; locally with GCC 15 and Clang 21).
+Requirements: CMake 3.16+ and GCC or Clang. Linux: tested in CI with GCC 11, 13 and Clang 18, locally with GCC 15 and Clang 21. Windows: MinGW-w64 GCC from [MSYS2](https://www.msys2.org), tested in CI and locally with GCC 15.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -136,17 +158,19 @@ ctest --test-dir build --output-on-failure
 sudo cmake --install build      # optional: headers, libcorundum.a, CMake package, corundum-inspect
 ```
 
+On Windows, from an MSYS2 MinGW shell or with `C:\msys64\mingw64\bin` on `PATH`, add `-G "MinGW Makefiles"` to the first command. Projects that do not use CMake can compile `src/corundum.c` as C11 and link it; the hot path is header-only.
+
 In your project: `find_package(Corundum REQUIRED)` and `target_link_libraries(app PRIVATE Corundum::corundum)`, or add this repository with `add_subdirectory`.
 
 ## Testing
 
 | Suite | What it covers |
 |---|---|
-| `test_ring` (907 checks) | Argument validation, foreign or half-initialised segments, exclusive roles and stale-owner recovery, full/empty boundaries, maximum-size records at every wrap position, staging, 400 000 random interleaved operations, corruption detection, close and timeout semantics |
-| `test_ipc` | 3 million variable-size records between two processes, every byte verified; 20 000 records to a futex-sleeping reader with no lost wake-ups; a writer killed with `SIGKILL` mid-stream |
+| `test_ring` (907 checks on Linux, 905 on Windows) | Argument validation, foreign or half-initialised segments, exclusive roles and stale-owner recovery, full/empty boundaries, maximum-size records at every wrap position, staging, 400 000 random interleaved operations, corruption detection, close and timeout semantics |
+| `test_ipc` | 3 million variable-size records between two processes, every byte verified; 20 000 records to a sleeping reader with no lost wake-ups; a writer killed mid-stream (`SIGKILL` / `TerminateProcess`) |
 | `test_cpp` | The C++ wrapper: typed and in-place writes, typed reads, move semantics, exceptions, a producer thread with `wait` |
 
-`scripts/check.sh` runs everything with GCC (`-Werror`) and again with Clang under AddressSanitizer and UndefinedBehaviorSanitizer. CI repeats this on x86-64 and on **arm64**, whose weaker memory model is where a missing acquire or release would show up.
+`scripts/check.sh` runs everything with GCC (`-Werror`) and again with Clang under AddressSanitizer and UndefinedBehaviorSanitizer. CI repeats this on Linux x86-64 and **arm64** (whose weaker memory model is where a missing acquire or release would show up) and runs the whole suite on **Windows** with MinGW-w64.
 
 ## How it works
 

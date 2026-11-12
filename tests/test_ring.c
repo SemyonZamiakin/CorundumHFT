@@ -1,14 +1,11 @@
 /* Single-process unit tests: API contract, edge cases, corruption handling. */
+#if !defined(_WIN32)
 #define _GNU_SOURCE
+#endif
 #include "corundum/corundum.h"
 #include "check.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/wait.h>
-#include <time.h>
 
 static char NAME[64];
 
@@ -50,14 +47,19 @@ static void test_validation(void) {
 /* A segment that exists but is not (yet) a valid ring. */
 static void test_foreign_segment(void) {
     crd_unlink(NAME);
+    crd_test_seg seg;
+    crd_reader r;
+#if !defined(_WIN32)
+    /* Linux only: a POSIX segment can exist with size 0 while its creator is mid-way */
     int fd = shm_open(NAME, O_RDWR | O_CREAT | O_EXCL, 0600);
     CHECK(fd >= 0);
-    crd_reader r;
-    CHECK_EQ(crd_reader_open(&r, NAME, 0), CRD_ENOTREADY); /* size 0: creator mid-way */
-    CHECK_EQ(ftruncate(fd, CRD_HEADER_SIZE + 4096), 0);
+    CHECK_EQ(crd_reader_open(&r, NAME, 0), CRD_ENOTREADY);
+    close(fd);
+    shm_unlink(NAME);
+#endif
+    CHECK(crd_test_seg_create(&seg, NAME, CRD_HEADER_SIZE + 4096));
+    crd_shm *shm = (crd_shm *)seg.p;
     CHECK_EQ(crd_reader_open(&r, NAME, 0), CRD_ENOTREADY); /* magic not yet published */
-    crd_shm *shm = mmap(NULL, CRD_HEADER_SIZE + 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    CHECK(shm != MAP_FAILED);
     shm->magic = 0x1234;
     CHECK_EQ(crd_reader_open(&r, NAME, 0), CRD_EVERSION);
     shm->magic = CRD_MAGIC;
@@ -65,13 +67,12 @@ static void test_foreign_segment(void) {
     CHECK_EQ(crd_reader_open(&r, NAME, 0), CRD_EVERSION);
     shm->version = CRD_LAYOUT_VERSION;
     shm->header_size = CRD_HEADER_SIZE;
-    shm->capacity = 8192; /* does not match the segment size */
+    shm->capacity = 8192; /* larger than the segment */
     CHECK_EQ(crd_reader_open(&r, NAME, 0), CRD_ECORRUPT);
     shm->capacity = 4096;
     CHECK_EQ(crd_reader_open(&r, NAME, 0), CRD_OK);
     crd_reader_close(&r);
-    munmap(shm, CRD_HEADER_SIZE + 4096);
-    close(fd);
+    crd_test_seg_destroy(&seg, NAME);
 }
 
 static void test_exclusive_roles(void) {
@@ -88,21 +89,20 @@ static void test_exclusive_roles(void) {
     crd_reader_close(&r1);
 
     /* a writer slot held by a process that no longer exists is reclaimed */
-    pid_t child = fork();
-    if (child == 0) _exit(0);
-    waitpid(child, NULL, 0);
+    int dead = crd_test_dead_pid();
+    CHECK(dead > 0);
     crd_writer_open(&w1, NAME, 0);
-    w1.shm->writer_pid = (int32_t)child;
+    w1.shm->writer_pid = (int32_t)dead;
     crd_shm *shm = w1.shm;
     CHECK_EQ(crd_writer_open(&w2, NAME, 0), CRD_OK); /* stale pid */
     crd_writer_close(&w2);
 
-    /* a live foreign holder (our parent) blocks, unless TAKEOVER is given */
-    shm->writer_pid = (int32_t)getppid();
+    /* a live foreign holder blocks, unless TAKEOVER is given */
+    shm->writer_pid = (int32_t)crd_test_live_foreign_pid();
     CHECK_EQ(crd_writer_open(&w2, NAME, 0), CRD_EBUSY);
     CHECK_EQ(crd_writer_open(&w2, NAME, CRD_OPEN_TAKEOVER), CRD_OK);
     crd_writer_close(&w2);
-    w1.shm->writer_pid = (int32_t)getpid();
+    w1.shm->writer_pid = (int32_t)crd_test_pid();
     crd_writer_close(&w1);
 }
 
@@ -321,8 +321,8 @@ static void test_inspect_close_wait(void) {
     CHECK_EQ(crd_inspect(NAME, &info), CRD_OK);
     CHECK_EQ(info.capacity, 4096u);
     CHECK_EQ(info.used_bytes, 16u);
-    CHECK_EQ(info.writer_pid, (int32_t)getpid());
-    CHECK_EQ(info.reader_pid, (int32_t)getpid());
+    CHECK_EQ(info.writer_pid, (int32_t)crd_test_pid());
+    CHECK_EQ(info.reader_pid, (int32_t)crd_test_pid());
     CHECK_EQ(info.writer_closed, 0);
     CHECK(info.created_unix_ns > 0);
 
@@ -330,12 +330,10 @@ static void test_inspect_close_wait(void) {
     crd_read(&r, &m);
     crd_release(&r);
 
-    struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int64_t t0 = crd_test_ms();
     CHECK_EQ(crd_wait(&r, 20 * 1000 * 1000), CRD_TIMEOUT);
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
-    CHECK(ms >= 19);
+    int64_t ms = crd_test_ms() - t0;
+    CHECK(ms >= 15); /* GetTickCount64 has ~16 ms granularity on Windows */
     CHECK_EQ(crd_wait(&r, 0), CRD_TIMEOUT);
 
     crd_write(&w, 2, "last", 4);

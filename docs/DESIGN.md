@@ -102,6 +102,14 @@ This is the Dekker pattern: each side stores its own flag, issues a full fence, 
 
 When the reader is awake, `crd_notify` costs one fence (`mfence` / `lock`-prefixed instruction on x86, `dmb ish` on arm64) and one load, with no system call. The futex is a shared futex (no `FUTEX_PRIVATE_FLAG`), which the kernel keys by physical page, so it works across processes.
 
+### Windows
+
+The Windows backend keeps the same shared layout and the same hot path; only setup and sleeping change:
+
+- The segment is a pagefile-backed file mapping named `Local\corundum.<name>` (the current logon session's namespace, no special privileges). Windows deletes a mapping when its last handle closes, so the creating process keeps one handle in a small fixed table (no heap) until `crd_unlink` or process exit.
+- `crd_wait` / `crd_notify` use a named auto-reset event `Local\corundum.<name>.wake` instead of a futex. The Dekker handshake above is unchanged. An auto-reset event stays signalled until a wait consumes it, so a `SetEvent` that happens between the reader's check and its `WaitForSingleObject` is not lost. A stale signal only causes one extra wake-up, after which the reader re-checks and sleeps again.
+- Liveness of a writer or reader slot is checked with `OpenProcess` + `WaitForSingleObject(handle, 0)`.
+
 ## 6. Lifecycle and failure handling
 
 - **Creation is atomic for openers.** `crd_create` uses `O_CREAT | O_EXCL`, sizes the segment, fills in the header and stores `magic` last with release. An opener that sees a size below the header, or `magic == 0`, gets `CRD_ENOTREADY` and can retry. A wrong magic or version gives `CRD_EVERSION`; a capacity that does not match the segment size gives `CRD_ECORRUPT`.

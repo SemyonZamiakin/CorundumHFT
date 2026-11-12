@@ -1,14 +1,19 @@
-/* Cross-process tests: a forked writer and the parent as reader share one ring. */
+/* Cross-process tests: a child process writes, the parent reads one shared ring.
+ * Linux: the child is forked. Windows: the test re-runs itself as
+ * "test_ipc --child <n> <ring>". */
+#if !defined(_WIN32)
 #define _GNU_SOURCE
+#endif
 #include "corundum/corundum.h"
 #include "check.h"
 
-#include <signal.h>
 #include <string.h>
-#include <sys/wait.h>
-#include <time.h>
+#if !defined(_WIN32)
+#include <signal.h>
+#endif
 
 static char NAME[64];
+static const char *ARGV0;
 
 static uint64_t mix(uint64_t x) { /* splitmix64 */
     x += 0x9E3779B97F4A7C15ull;
@@ -35,20 +40,48 @@ static int msg_ok(const crd_msg *m, uint64_t seq) {
     return memcmp(m->data, want, n) == 0;
 }
 
-static pid_t spawn_writer(void (*body)(void)) {
+#if defined(_WIN32)
+typedef HANDLE child_t;
+static child_t spawn_writer(int which) {
+    char cmd[1024];
+    snprintf(cmd, sizeof cmd, "\"%s\" --child %d %s", ARGV0, which, NAME);
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) return NULL;
+    CloseHandle(pi.hThread);
+    return pi.hProcess;
+}
+static int child_status(child_t h) {
+    DWORD code = 255;
+    WaitForSingleObject(h, INFINITE);
+    GetExitCodeProcess(h, &code);
+    CloseHandle(h);
+    return (int)code;
+}
+static int child_id(child_t h) { return (int)GetProcessId(h); }
+static void child_exit(int code) { ExitProcess((UINT)code); }
+static void child_crash(void) { TerminateProcess(GetCurrentProcess(), 137); }
+#define CRASH_STATUS 137
+#else
+typedef pid_t child_t;
+static void run_child(int which);
+static child_t spawn_writer(int which) {
     pid_t pid = fork();
-    if (pid == 0) {
-        body();
-        _exit(crd_test_failures ? 1 : 0);
-    }
+    if (pid == 0) run_child(which);
     return pid;
 }
-
-static int child_status(pid_t pid) {
+static int child_status(child_t pid) {
     int st = 0;
     waitpid(pid, &st, 0);
     return WIFEXITED(st) ? WEXITSTATUS(st) : 100 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
 }
+static int child_id(child_t pid) { return (int)pid; }
+static void child_exit(int code) { _exit(code); }
+static void child_crash(void) { raise(SIGKILL); }
+#define CRASH_STATUS (100 + SIGKILL)
+#endif
 
 /* ---- 1. busy-poll stress: millions of variable-size records, verified byte by byte ---- */
 
@@ -56,7 +89,7 @@ static const uint64_t STRESS_N = 3000000;
 
 static void stress_writer(void) {
     crd_writer w;
-    if (crd_writer_open(&w, NAME, CRD_OPEN_PREFAULT) != CRD_OK) _exit(2);
+    if (crd_writer_open(&w, NAME, CRD_OPEN_PREFAULT) != CRD_OK) child_exit(2);
     for (uint64_t seq = 0; seq < STRESS_N; ++seq) {
         const uint32_t n = msg_size(seq);
         void *p = NULL;
@@ -80,11 +113,10 @@ static void test_stress(void) {
     CHECK_EQ(crd_create(NAME, 1u << 16, 0600, CRD_CREATE_REPLACE), CRD_OK);
     crd_reader r;
     CHECK_EQ(crd_reader_open(&r, NAME, CRD_OPEN_PREFAULT), CRD_OK);
-    pid_t child = spawn_writer(stress_writer);
+    child_t child = spawn_writer(0);
 
     uint64_t seq = 0, bad = 0, since_release = 0;
-    struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
+    const int64_t t0 = crd_test_ms();
     while (seq < STRESS_N) {
         crd_msg m = {0};
         crd_status s = crd_read(&r, &m);
@@ -106,8 +138,7 @@ static void test_stress(void) {
         }
     }
     crd_release(&r);
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    double sec = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
+    double sec = (double)(crd_test_ms() - t0) / 1000.0 + 1e-3;
     printf("stress: %llu records verified in %.2f s (%.1f M/s)\n", (unsigned long long)seq, sec, (double)seq / sec / 1e6);
     CHECK_EQ(bad, 0u);
     CHECK_EQ(seq, STRESS_N);
@@ -121,7 +152,7 @@ static const uint64_t WAIT_N = 20000;
 
 static void wait_writer(void) {
     crd_writer w;
-    if (crd_writer_open(&w, NAME, 0) != CRD_OK) _exit(2);
+    if (crd_writer_open(&w, NAME, 0) != CRD_OK) child_exit(2);
     uint64_t rng = 1;
     for (uint64_t seq = 0; seq < WAIT_N; ++seq) {
         const uint32_t n = msg_size(seq);
@@ -132,8 +163,7 @@ static void wait_writer(void) {
         crd_notify(&w);
         rng = mix(rng);
         if (rng % 64 == 0) { /* pause now and then so the reader really goes to sleep */
-            struct timespec ts = {0, (long)(rng % 200000)};
-            nanosleep(&ts, NULL);
+            crd_test_sleep_us((unsigned)(rng % 200));
         }
     }
     crd_writer_close(&w);
@@ -143,7 +173,7 @@ static void test_wait_notify(void) {
     CHECK_EQ(crd_create(NAME, 1u << 14, 0600, CRD_CREATE_REPLACE), CRD_OK);
     crd_reader r;
     CHECK_EQ(crd_reader_open(&r, NAME, 0), CRD_OK);
-    pid_t child = spawn_writer(wait_writer);
+    child_t child = spawn_writer(1);
     uint64_t seq = 0, bad = 0, timeouts = 0;
     crd_status ws;
     for (;;) {
@@ -173,25 +203,26 @@ static void test_wait_notify(void) {
 
 static void crash_writer(void) {
     crd_writer w;
-    if (crd_writer_open(&w, NAME, 0) != CRD_OK) _exit(2);
+    if (crd_writer_open(&w, NAME, 0) != CRD_OK) child_exit(2);
     for (uint64_t seq = 0; seq < 10; ++seq) {
         unsigned char buf[400];
         msg_fill(buf, msg_size(seq), seq);
         crd_write(&w, (uint32_t)seq, buf, msg_size(seq));
     }
-    raise(SIGKILL); /* no crd_writer_close */
+    child_crash(); /* no crd_writer_close */
 }
 
 static void test_writer_crash(void) {
     CHECK_EQ(crd_create(NAME, 1u << 14, 0600, CRD_CREATE_REPLACE), CRD_OK);
     crd_reader r;
     CHECK_EQ(crd_reader_open(&r, NAME, 0), CRD_OK);
-    pid_t child = spawn_writer(crash_writer);
-    CHECK_EQ(child_status(child), 100 + SIGKILL);
+    child_t child = spawn_writer(2);
+    const int child_pid = child_id(child);
+    CHECK_EQ(child_status(child), CRASH_STATUS);
 
     crd_info info;
     CHECK_EQ(crd_inspect(NAME, &info), CRD_OK);
-    CHECK_EQ(info.writer_pid, (int32_t)child); /* slot still names the dead process */
+    CHECK_EQ(info.writer_pid, (int32_t)child_pid); /* slot still names the dead process */
 
     crd_msg m = {0};
     uint64_t seq = 0;
@@ -211,7 +242,19 @@ static void test_writer_crash(void) {
     crd_reader_close(&r);
 }
 
-int main(void) {
+static void run_child(int which) {
+    if (which == 0) stress_writer();
+    else if (which == 1) wait_writer();
+    else crash_writer();
+    child_exit(crd_test_failures ? 1 : 0);
+}
+
+int main(int argc, char **argv) {
+    ARGV0 = argv[0];
+    if (argc == 4 && strcmp(argv[1], "--child") == 0) { /* Windows child process */
+        snprintf(NAME, sizeof NAME, "%s", argv[3]);
+        run_child(atoi(argv[2]));
+    }
     crd_test_name(NAME, sizeof NAME, "ipc");
     test_stress();
     test_wait_notify();

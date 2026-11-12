@@ -56,6 +56,27 @@ jobs:
           cmake --build "$RUNNER_TEMP/consumer/build"
           "$RUNNER_TEMP/consumer/build/consumer"
 
+  windows:
+    name: windows / mingw-w64 gcc
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-make
+      - name: Configure
+        run: cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCORUNDUM_WERROR=ON
+      - name: Build
+        run: cmake --build build -j4
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Benchmark (shared VM, informational)
+        run: ./build/corundum-bench.exe all -n 200000
+
   sanitizers:
     name: sanitizers / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

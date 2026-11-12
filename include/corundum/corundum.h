@@ -1,15 +1,17 @@
 /*
  * Corundum HFT by Euclase
  * Zero-copy, lock-free single-producer / single-consumer ring buffer
- * in POSIX shared memory, for passing high-frequency telemetry between
- * Linux processes.
+ * in shared memory, for passing high-frequency telemetry between
+ * processes on Linux (POSIX shm + futex) and Windows (named file mapping
+ * + event).
  *
  * The hot path (reserve / commit / read / release) is header-only and inline:
  * no system calls, no locks and no heap allocation. Synchronisation is one
  * acquire load and one release store per side, on separate cache lines.
  *
- * Requires GCC or Clang (uses the __atomic builtins) and a 64-bit target with
- * lock-free 64-bit atomics. Usable from C99 and C++11 and later.
+ * Requires GCC or Clang (uses the __atomic builtins; on Windows: MinGW-w64
+ * or clang) and a 64-bit target with lock-free 64-bit atomics. Usable from
+ * C99 and C++11 and later.
  *
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 Euclase
@@ -26,14 +28,14 @@ extern "C" {
 #endif
 
 #define CRD_VERSION_MAJOR 1
-#define CRD_VERSION_MINOR 0
+#define CRD_VERSION_MINOR 1
 #define CRD_VERSION_PATCH 0
-#define CRD_VERSION_STRING "1.0.0"
+#define CRD_VERSION_STRING "1.1.0"
 
 #if !defined(__GNUC__) && !defined(__clang__)
 #error "Corundum requires GCC or Clang (__atomic builtins)"
 #endif
-#if !defined(__LP64__) && !defined(_LP64)
+#if !defined(__SIZEOF_POINTER__) || __SIZEOF_POINTER__ != 8
 #error "Corundum requires a 64-bit target"
 #endif
 
@@ -50,7 +52,7 @@ typedef enum crd_status {
     CRD_CLOSED = 4,     /* crd_wait: ring is empty and the writer has closed */
 
     CRD_EINVAL = -1,    /* invalid argument or name */
-    CRD_ESYS = -2,      /* a system call failed; errno holds the reason */
+    CRD_ESYS = -2,      /* a system call failed; errno (Windows: GetLastError()) holds the reason */
     CRD_EEXIST = -3,    /* crd_create: a segment with this name already exists */
     CRD_ENOENT = -4,    /* no segment with this name */
     CRD_EBUSY = -5,     /* another live process holds this endpoint */
@@ -95,7 +97,7 @@ typedef struct crd_shm {
 
     /* cache line 1: written only by the producer */
     uint64_t head;          /* end of the last published record */
-    uint32_t notify_seq;    /* futex word for crd_wait / crd_notify */
+    uint32_t notify_seq;    /* futex word for crd_wait / crd_notify (Linux) */
     int32_t writer_pid;     /* 0 when no writer is attached */
     uint32_t writer_closed; /* 1 after crd_writer_close, until a writer attaches again */
     uint32_t reserved1;
@@ -134,6 +136,7 @@ typedef struct crd_writer {
     uint32_t has_res;
     size_t map_size;
     unsigned flags;
+    void *os_event;      /* Windows: wake-up event handle; unused on Linux */
 } crd_writer;
 
 typedef struct crd_reader {
@@ -145,6 +148,7 @@ typedef struct crd_reader {
     uint64_t head_cache; /* last head seen; refreshed only when the ring looks empty */
     size_t map_size;
     unsigned flags;
+    void *os_event;      /* Windows: wake-up event handle; unused on Linux */
 } crd_reader;
 
 /* A message returned by crd_read. data points straight into shared memory and
@@ -171,12 +175,20 @@ typedef struct crd_msg {
 /*
  * Creates a shared-memory segment named `name` ("/something", no other '/')
  * holding an empty ring of `capacity` data bytes (a power of two between
- * CRD_MIN_CAPACITY and CRD_MAX_CAPACITY). `mode` is the permission mask, for
- * example 0600 (owner only). The segment lives until crd_unlink or reboot.
+ * CRD_MIN_CAPACITY and CRD_MAX_CAPACITY).
+ *
+ * Linux: a POSIX shm object; `mode` is the permission mask (e.g. 0600). It
+ * lives until crd_unlink or reboot.
+ * Windows: a pagefile-backed file mapping named "Local\corundum.<name>"
+ * (visible to the current logon session; `mode` is ignored, the default
+ * security of the creating process applies). Windows deletes a mapping when
+ * its last handle closes, so the creating process keeps one handle until it
+ * calls crd_unlink or exits; the ring stays alive while any process has it open.
  */
 crd_status crd_create(const char *name, uint64_t capacity, unsigned mode, unsigned flags);
 
-/* Removes the name. Processes that have the ring open keep working. */
+/* Removes the name (Windows: releases the creator's handle). Processes that
+ * have the ring open keep working. */
 crd_status crd_unlink(const char *name);
 
 /* Attaches as the only producer / the only consumer. Fails with CRD_EBUSY if
@@ -217,7 +229,7 @@ crd_status crd_inspect(const char *name, crd_info *info);
 crd_status crd_wait(crd_reader *r, int64_t timeout_ns);
 
 /* Slow part of crd_notify; do not call directly. */
-void crd__wake(crd_shm *shm);
+void crd__wake(crd_shm *shm, void *os_event);
 
 /* ------------------------------------------------------------------------ */
 /* Hot path: inline, wait-free, no system calls                             */
@@ -312,7 +324,7 @@ static inline crd_status crd_write(crd_writer *w, uint32_t type, const void *src
  */
 static inline void crd_notify(crd_writer *w) {
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    if (__atomic_load_n(&w->shm->reader_waiting, __ATOMIC_RELAXED)) crd__wake(w->shm);
+    if (__atomic_load_n(&w->shm->reader_waiting, __ATOMIC_RELAXED)) crd__wake(w->shm, w->os_event);
 }
 
 /* Bytes currently free for the writer (may be stale by the time you use it). */
