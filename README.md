@@ -7,7 +7,47 @@
   <img src="https://img.shields.io/badge/license-MIT-2DD4BF?labelColor=0F2933" alt="MIT">
 </p>
 
-**English** · [Українська](README.uk.md)
+<h3 align="center">Nanosecond IPC between processes.<br>Zero copies. No locks. No system calls on the hot path.</h3>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#benchmarks">Benchmarks</a> ·
+  <a href="docs/DESIGN.md">Design</a> ·
+  <a href="#testing">What is tested</a> ·
+  <a href="README.uk.md">Українська</a>
+</p>
+
+<p align="center"><img src="docs/img/divider.png" width="100%" alt=""></p>
+
+## Overview & Use Cases
+
+> **In one sentence:** Corundum moves messages between two processes on the same machine through shared memory in tens of nanoseconds, with no copies, no locks and no system calls on the hot path.
+
+**Why it exists.** Pipes and sockets copy every message into the kernel and back out, and every transfer is a system call: microseconds per message. When a background service produces thousands of updates per second, or a GUI has to show a daemon's data the instant it changes, that overhead dominates. Corundum gives both processes the same ring buffer in memory: the writer builds each message in place, the reader uses it in place, and they coordinate with one acquire load and one release store per side.
+
+<table>
+  <tr>
+    <td width="33%" valign="top"><b>Daemon → GUI telemetry</b><br><sub>A background collector streams samples to a dashboard. This is how Euclase Monitor feeds Euclase Light.</sub></td>
+    <td width="33%" valign="top"><b>High-rate data feeds</b><br><sub>Capture, decoding or sensor processes that hand data to one consumer which must keep up without being slowed down.</sub></td>
+    <td width="33%" valign="top"><b>Isolation without the latency tax</b><br><sub>Move a crash-prone part (a plugin, a decoder) into its own process and keep communication fast.</sub></td>
+  </tr>
+  <tr>
+    <td width="33%" valign="top"><b>Logging and tracing pipelines</b><br><sub>The hot path writes records in place; a separate process compresses, filters or stores them.</sub></td>
+    <td width="33%" valign="top"><b>One API, two systems</b><br><sub>The same code runs on Linux (POSIX shm + futex) and Windows (named mapping + event).</sub></td>
+    <td width="33%" valign="top"><b>Learn lock-free design</b><br><sub>A small codebase, a design document that walks through the memory-ordering argument, and a benchmark to see the numbers yourself.</sub></td>
+  </tr>
+</table>
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#0F2933', 'primaryTextColor': '#F8FAFC', 'primaryBorderColor': '#2DD4BF', 'lineColor': '#2DD4BF', 'edgeLabelBackground': '#0F2933', 'textColor': '#2DD4BF', 'fontFamily': 'Segoe UI, Helvetica, Arial, sans-serif'}}}%%
+flowchart LR
+    W["Writer process<br/>reserve → fill in place → commit"] -- "release store" --> R[("Ring buffer<br/>in shared memory")]
+    R -- "acquire load" --> D["Reader process<br/>read in place → release"]
+```
+
+**New here?** Start with the [Quick start](#quick-start) (ten lines of C or C++), then [docs/DESIGN.md](docs/DESIGN.md) explains step by step why it is correct.
+
+<p align="center"><img src="docs/img/divider.png" width="100%" alt=""></p>
 
 # Corundum HFT
 
