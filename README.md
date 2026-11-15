@@ -53,8 +53,6 @@ flowchart LR
 
 A zero-copy, lock-free ring buffer in shared memory for passing high-frequency telemetry between processes on **Linux and Windows**, for example from a background monitoring daemon to a GUI.
 
-Pipes and sockets copy every message into the kernel and back out, and each transfer is a system call. Corundum places a single-producer / single-consumer ring in a shared-memory segment that both processes map (Linux: `shm_open`; Windows: a named file mapping). The writer builds a message directly in shared memory, the reader uses it in place, and the two coordinate through one acquire load and one release store per side. Sending and receiving makes no system calls and allocates no memory.
-
 ## Features
 
 - **Zero-copy in both directions.** `crd_reserve` returns a pointer into the ring, you fill it, `crd_commit` publishes it. `crd_read` returns a pointer to the record in place.
