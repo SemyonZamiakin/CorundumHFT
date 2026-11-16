@@ -1,0 +1,65 @@
+Corundum 1.2.0, Intel Core i9-9900K, WSL2 Ubuntu on Windows 11, Release (-O3)
+Command: corundum-bench all -n 1000000 -c 2,4, then two more runs of latency / oneway / ops
+Date: 2026-11-16
+
+kernel 6.18.33.2-microsoft-standard-WSL2, gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+Corundum 1.2.0 benchmark, 1000000 messages, pinned
+
+-- latency, 64-byte ping-pong between two processes --
+corundum round trip    min     33  p50    144  p99    227  p99.9     281  max    90505  mean  129.6  ns
+corundum rtt / 2       min     16  p50     72  p99    114  p99.9     141  max    45252  mean   64.8  ns
+  pinger  hot loop: 2 context switches (0 voluntary), kernel 0.0 ms, user 158.1 ms
+pipe round trip        min   1944  p50  43479  p99  81973  p99.9  156011  max  4523612  mean 46746.9  ns
+pipe rtt / 2           min    972  p50  21739  p99  40986  p99.9   78005  max  2261806  mean 23373.4  ns
+unix socket round trip min   4449  p50  40480  p99  89837  p99.9  167880  max 26824370  mean 43706.4  ns
+unix socket rtt / 2    min   2224  p50  20240  p99  44918  p99.9   83940  max 13412185  mean 21853.2  ns
+
+-- one-way latency, 64-byte packet, writer and reader in separate processes --
+corundum one-way       min     21  p50     91  p99    125  p99.9    6779  max  1455201  mean  101.7  ns
+  writer  hot loop: 3 context switches (0 voluntary), kernel 0.0 ms, user 819.9 ms
+  reader  hot loop: 4 context switches (0 voluntary), kernel 0.0 ms, user 819.1 ms
+
+-- hot-path cost, 64-byte packet, one thread --
+write  (reserve + fill + commit)    8.30 ns/packet
+read   (read + use + release)       4.44 ns/packet
+write + read of the same packet     8.38 ns/packet
+  ops     hot loop: 2 context switches (0 voluntary), kernel 0.0 ms, user 420.0 ms
+
+-- throughput, one-way stream --
+corundum        16 B:   191.74 M msg/s     3.07 GB/s
+pipe            16 B:     4.82 M msg/s     0.08 GB/s
+unix socket     16 B:     1.71 M msg/s     0.03 GB/s
+corundum        64 B:   166.50 M msg/s    10.66 GB/s
+pipe            64 B:     4.81 M msg/s     0.31 GB/s
+unix socket     64 B:     1.73 M msg/s     0.11 GB/s
+corundum       256 B:    88.89 M msg/s    22.76 GB/s
+pipe           256 B:     3.95 M msg/s     1.01 GB/s
+unix socket    256 B:     1.63 M msg/s     0.42 GB/s
+corundum      1024 B:    25.88 M msg/s    26.51 GB/s
+pipe          1024 B:     2.92 M msg/s     2.99 GB/s
+unix socket   1024 B:     1.50 M msg/s     1.53 GB/s
+corundum      4096 B:     5.79 M msg/s    23.71 GB/s
+pipe          4096 B:     1.52 M msg/s     6.24 GB/s
+unix socket   4096 B:     0.97 M msg/s     3.98 GB/s
+corundum round trip    min     32  p50    151  p99    219  p99.9     277  max   114106  mean  140.1  ns
+corundum rtt / 2       min     16  p50     75  p99    110  p99.9     139  max    57053  mean   70.1  ns
+  pinger  hot loop: 1 context switches (0 voluntary), kernel 3.9 ms, user 165.2 ms
+-- one-way latency, 64-byte packet, writer and reader in separate processes --
+corundum one-way       min     19  p50     91  p99    120  p99.9    6676  max   255729  mean  107.3  ns
+  writer  hot loop: 1 context switches (0 voluntary), kernel 0.0 ms, user 828.7 ms
+  reader  hot loop: 3 context switches (0 voluntary), kernel 0.0 ms, user 828.7 ms
+write  (reserve + fill + commit)    8.28 ns/packet
+read   (read + use + release)       4.57 ns/packet
+write + read of the same packet     8.63 ns/packet
+  ops     hot loop: 0 context switches (0 voluntary), kernel 0.0 ms, user 433.1 ms
+corundum round trip    min     34  p50    163  p99    225  p99.9     295  max   178969  mean  162.1  ns
+corundum rtt / 2       min     17  p50     81  p99    113  p99.9     148  max    89485  mean   81.1  ns
+  pinger  hot loop: 1 context switches (0 voluntary), kernel 0.0 ms, user 190.1 ms
+-- one-way latency, 64-byte packet, writer and reader in separate processes --
+corundum one-way       min     18  p50     94  p99    122  p99.9    3651  max   433662  mean  108.5  ns
+  writer  hot loop: 1 context switches (0 voluntary), kernel 0.0 ms, user 836.5 ms
+  reader  hot loop: 2 context switches (0 voluntary), kernel 0.0 ms, user 836.5 ms
+write  (reserve + fill + commit)    8.50 ns/packet
+read   (read + use + release)       4.52 ns/packet
+write + read of the same packet     8.71 ns/packet
+  ops     hot loop: 1 context switches (0 voluntary), kernel 0.0 ms, user 433.7 ms

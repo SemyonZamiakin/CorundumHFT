@@ -54,6 +54,7 @@ public:
     const void *data() const noexcept { return m_.data; }
     std::uint32_t size() const noexcept { return m_.size; }
     std::uint32_t type() const noexcept { return m_.type; }
+    const crd_msg *native() const noexcept { return &m_; }
 
     /// Typed in-place view, or nullptr if the size does not match sizeof(T).
     template <class T>

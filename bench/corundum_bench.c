@@ -2,16 +2,21 @@
  * corundum-bench: latency and throughput of Corundum against a pipe and a
  * Unix-domain socketpair, between two processes.
  *
- *   corundum-bench [latency|throughput|all] [-n COUNT] [-c CPU_A,CPU_B]
+ *   corundum-bench [latency|oneway|ops|throughput|all] [-n COUNT] [-c CPU_A,CPU_B]
  *
- * Latency: ping-pong of 64-byte messages; one-way latency = round trip / 2.
- * Throughput: one process streams COUNT messages, the other consumes them.
+ * latency:    ping-pong of 64-byte messages between two processes (round trip,
+ *             and round trip / 2), against a pipe and a Unix socket.
+ * oneway:     one-way latency measured directly: the writer timestamps each
+ *             packet, the reader in another process timestamps its arrival.
+ * ops:        cost of the hot-path calls themselves, in one thread.
+ * throughput: one process streams COUNT messages, the other consumes them.
  *
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 Euclase
  */
 #define _GNU_SOURCE
 #include "corundum/corundum.h"
+#include "bench_common.h"
 
 #include <errno.h>
 #include <sched.h>
@@ -33,61 +38,16 @@ static void pin(int cpu) {
     if (sched_setaffinity(0, sizeof set, &set) != 0) perror("sched_setaffinity");
 }
 
-static inline uint64_t now_ns(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-}
+#define now_ns bench_now_ns
+#define die bench_die
 
-/* Fine-grained timestamps for per-sample latency. clock_gettime can be too
- * coarse (100 ns steps under some hypervisors), so read the CPU counter and
- * calibrate it against CLOCK_MONOTONIC over the whole run. */
-static inline uint64_t ticks(void) {
-#if defined(__x86_64__)
-    uint32_t lo, hi;
-    __asm__ __volatile__("lfence; rdtsc" : "=a"(lo), "=d"(hi)::"memory");
-    return ((uint64_t)hi << 32) | lo;
-#elif defined(__aarch64__)
-    uint64_t v;
-    __asm__ __volatile__("isb; mrs %0, cntvct_el0" : "=r"(v)::"memory");
-    return v;
-#else
-    return now_ns();
-#endif
-}
-
-typedef struct {
-    uint64_t t0, n0;
-} calib;
-static calib calib_start(void) {
-    calib c = {ticks(), now_ns()};
-    return c;
-}
-static double calib_ns_per_tick(calib c) {
-    uint64_t t1 = ticks(), n1 = now_ns();
-    return (double)(n1 - c.n0) / (double)(t1 - c.t0);
-}
-
-static int cmp_u32(const void *a, const void *b) {
-    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
-    return (x > y) - (x < y);
-}
-
-/* rtt: round trips in ticks. Prints one-way latency (round trip / 2) in ns. */
+/* Ping-pong round trips in ticks: prints the round trip and half of it. */
 static void report_latency(const char *what, uint32_t *rtt, size_t n, double ns_per_tick) {
-    qsort(rtt, n, sizeof *rtt, cmp_u32);
-    double sum = 0;
-    for (size_t i = 0; i < n; ++i) sum += rtt[i];
-    const double k = ns_per_tick / 2.0;
-#define P(q) (rtt[(size_t)((double)(n - 1) * (q))] * k)
-    printf("%-12s one-way ns: min %7.0f  p50 %7.0f  p99 %7.0f  p99.9 %7.0f  mean %7.0f\n", what, rtt[0] * k, P(0.50),
-           P(0.99), P(0.999), sum / (double)n * k);
-#undef P
-}
-
-static void die(const char *what, crd_status s) {
-    fprintf(stderr, "%s: %s\n", what, crd_strerror(s));
-    exit(1);
+    char label[64];
+    snprintf(label, sizeof label, "%s round trip", what);
+    report_ticks(label, rtt, n, ns_per_tick);
+    snprintf(label, sizeof label, "%s rtt / 2", what);
+    report_ticks(label, rtt, n, ns_per_tick / 2.0); /* already sorted */
 }
 
 /* ------------------------------------------------------------------ latency */
@@ -130,6 +90,7 @@ static void latency_corundum(size_t n) {
     if (s != CRD_OK) die("reader_open", s);
     uint32_t *rtt = malloc(n * sizeof *rtt);
     calib cal = calib_start();
+    kstats k0 = kstats_now();
     for (size_t i = 0; i < n + warm; ++i) {
         uint64_t t0 = ticks();
         ping_t *p;
@@ -143,7 +104,9 @@ static void latency_corundum(size_t n) {
         uint64_t t1 = ticks();
         if (i >= warm) rtt[i - warm] = (uint32_t)(t1 - t0);
     }
+    kstats kd = kstats_diff(k0, kstats_now());
     report_latency("corundum", rtt, n, calib_ns_per_tick(cal));
+    report_kstats("pinger", kd);
     waitpid(child, NULL, 0);
     free(rtt);
     crd_writer_close(&out);
@@ -209,6 +172,31 @@ static void latency_fd(size_t n, int kind) {
         close(b[0]);
         close(b[1]);
     }
+}
+
+/* ------------------------------------------------------------------- oneway */
+
+static void oneway_corundum(size_t n) {
+    const char *name = "/crd-bench-ow";
+    crd_status s;
+    if ((s = crd_create(name, 1u << 16, 0600, CRD_CREATE_REPLACE)) != CRD_OK) die("create", s);
+    crd_reader r;
+    if ((s = crd_reader_open(&r, name, CRD_OPEN_PREFAULT)) != CRD_OK) die("reader_open", s);
+    const size_t warm = n / 10;
+    pid_t child = fork();
+    if (child == 0) {
+        pin(cpu_b);
+        crd_writer w;
+        if (crd_writer_open(&w, name, CRD_OPEN_PREFAULT) != CRD_OK) _exit(1);
+        oneway_writer(&w, n + warm);
+        crd_writer_close(&w);
+        _exit(0);
+    }
+    pin(cpu_a);
+    oneway_reader(&r, n, warm);
+    waitpid(child, NULL, 0);
+    crd_reader_close(&r);
+    crd_unlink(name);
 }
 
 /* --------------------------------------------------------------- throughput */
@@ -305,16 +293,25 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-c") && i + 1 < argc) sscanf(argv[++i], "%d,%d", &cpu_a, &cpu_b);
         else if (argv[i][0] != '-') mode = argv[i];
         else {
-            fprintf(stderr, "usage: %s [latency|throughput|all] [-n COUNT] [-c CPU_A,CPU_B]\n", argv[0]);
+            fprintf(stderr, "usage: %s [latency|oneway|ops|throughput|all] [-n COUNT] [-c CPU_A,CPU_B]\n", argv[0]);
             return 2;
         }
     }
     printf("Corundum %s benchmark, %zu messages%s\n", CRD_VERSION_STRING, n, cpu_a >= 0 ? ", pinned" : "");
     if (!strcmp(mode, "latency") || !strcmp(mode, "all")) {
-        printf("\n-- latency, 64-byte ping-pong --\n");
+        printf("\n-- latency, 64-byte ping-pong between two processes --\n");
         latency_corundum(n);
         latency_fd(n / 4, 0);
         latency_fd(n / 4, 1);
+    }
+    if (!strcmp(mode, "oneway") || !strcmp(mode, "all")) {
+        printf("\n-- one-way latency, 64-byte packet, writer and reader in separate processes --\n");
+        oneway_corundum(n);
+    }
+    if (!strcmp(mode, "ops") || !strcmp(mode, "all")) {
+        printf("\n-- hot-path cost, 64-byte packet, one thread --\n");
+        pin(cpu_a);
+        bench_ops("/crd-bench-ops", n * 10);
     }
     if (!strcmp(mode, "throughput") || !strcmp(mode, "all")) {
         printf("\n-- throughput, one-way stream --\n");

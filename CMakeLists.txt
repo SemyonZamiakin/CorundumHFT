@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(Corundum VERSION 1.1.0 LANGUAGES C CXX
+project(Corundum VERSION 1.2.0 LANGUAGES C CXX
         DESCRIPTION "Corundum HFT by Euclase: zero-copy lock-free IPC ring buffer in shared memory")
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -49,17 +49,34 @@ endif()
 if(CORUNDUM_BUILD_TESTS)
   enable_testing()
   find_package(Threads REQUIRED)
-  foreach(t test_ring test_ipc)
+  foreach(t test_ring test_ipc test_layout test_wire)
     add_executable(${t} tests/${t}.c)
     target_link_libraries(${t} PRIVATE corundum)
     target_compile_options(${t} PRIVATE ${CORUNDUM_WARNINGS})
     add_test(NAME ${t} COMMAND ${t})
   endforeach()
-  add_executable(test_cpp tests/test_cpp.cpp)
-  target_link_libraries(test_cpp PRIVATE corundum Threads::Threads)
-  target_compile_options(test_cpp PRIVATE ${CORUNDUM_WARNINGS})
-  add_test(NAME test_cpp COMMAND test_cpp)
-  set_tests_properties(test_ring test_ipc test_cpp PROPERTIES TIMEOUT 120)
+  foreach(t test_cpp test_wire_cpp test_concurrency)
+    add_executable(${t} tests/${t}.cpp)
+    target_link_libraries(${t} PRIVATE corundum Threads::Threads)
+    target_compile_options(${t} PRIVATE ${CORUNDUM_WARNINGS})
+    add_test(NAME ${t} COMMAND ${t})
+  endforeach()
+  set_tests_properties(test_ring test_ipc test_layout test_wire test_cpp test_wire_cpp test_concurrency
+    PROPERTIES TIMEOUT 300)
+
+  # corundum/wire.h must reject bad layouts at compile time. Case 0 is a correct
+  # layout and must build (so a failure of the others is the check, not a typo).
+  foreach(case 0 1 2 3 4 5 6 7)
+    add_executable(wire_compile_fail_${case} EXCLUDE_FROM_ALL tests/wire_compile_fail.c)
+    target_link_libraries(wire_compile_fail_${case} PRIVATE corundum)
+    target_compile_definitions(wire_compile_fail_${case} PRIVATE WIRE_CASE=${case})
+    add_test(NAME wire_compile_fail_${case}
+      COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target wire_compile_fail_${case} --config $<CONFIG>)
+    if(NOT case EQUAL 0)
+      set_tests_properties(wire_compile_fail_${case} PROPERTIES WILL_FAIL TRUE)
+    endif()
+    set_tests_properties(wire_compile_fail_${case} PROPERTIES RUN_SERIAL TRUE)
+  endforeach()
 endif()
 
 if(CORUNDUM_BUILD_BENCH)
@@ -73,6 +90,9 @@ if(CORUNDUM_BUILD_BENCH)
 endif()
 
 if(CORUNDUM_BUILD_EXAMPLES)
+  add_executable(wire_demo examples/wire_demo.c)
+  target_link_libraries(wire_demo PRIVATE corundum)
+  target_compile_options(wire_demo PRIVATE ${CORUNDUM_WARNINGS})
   add_executable(corundum-inspect tools/corundum_inspect.c)
   target_link_libraries(corundum-inspect PRIVATE corundum)
   target_compile_options(corundum-inspect PRIVATE ${CORUNDUM_WARNINGS})

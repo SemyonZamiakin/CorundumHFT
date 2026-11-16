@@ -11,8 +11,10 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
+  <a href="#whats-new-in-120">What's new</a> ·
   <a href="#benchmarks">Benchmarks</a> ·
   <a href="docs/DESIGN.md">Design</a> ·
+  <a href="docs/WIRE.md">Binary layouts</a> ·
   <a href="#testing">What is tested</a> ·
   <a href="README.uk.md">Українська</a>
 </p>
@@ -53,6 +55,13 @@ flowchart LR
 
 A zero-copy, lock-free ring buffer in shared memory for passing high-frequency telemetry between processes on **Linux and Windows**, for example from a background monitoring daemon to a GUI.
 
+## What's new in 1.2.0
+
+- **Latency microbenchmarks.** `corundum-bench` gained two modes. `oneway` measures one-way latency directly: the writer stamps each packet with the CPU's cycle counter, the reader in another process stamps its arrival. `ops` measures what the hot-path calls cost by themselves, in one thread. The ping-pong now prints the round trip as well as round trip / 2, and every hot loop reports how often the OS switched the thread out. [Results below.](#benchmarks)
+- **Zero-copy integrity tests.** `test_layout` checks the 128-byte separation of producer and consumer fields at compile time and at run time, records which header bytes each side's hot path actually writes (the producer writes only its block, the consumer only its block, and the reader never writes into the data region), fills the ring to overflow for 133 record sizes from several start offsets, and runs both positions across the 2^64 wrap. `test_concurrency` runs a producer and a consumer thread on one mapping so ThreadSanitizer can check the acquire/release pairing; weakening any of the four orderings makes it fail.
+- **Checked binary layouts.** New header [`corundum/wire.h`](include/corundum/wire.h): `CRD_WIRE_PACKED` fails to compile if a struct has padding, a misaligned field or too much alignment; `CRD_WIRE_SIZE` and `CRD_WIRE_OFFSET` pin the layout; `CRD_MSG_AS` gives a typed view of a record in place. Market-data example, byte-exact tests and a guide: [docs/WIRE.md](docs/WIRE.md).
+- Additions only: the existing API is unchanged and the shared layout too (`CRD_LAYOUT_VERSION` stays 1), so 1.0, 1.1 and 1.2 processes interoperate. Details in the [CHANGELOG](CHANGELOG.md).
+
 ## Features
 
 - **Zero-copy in both directions.** `crd_reserve` returns a pointer into the ring, you fill it, `crd_commit` publishes it. `crd_read` returns a pointer to the record in place.
@@ -63,7 +72,8 @@ A zero-copy, lock-free ring buffer in shared memory for passing high-frequency t
 - **Optional blocking.** `crd_wait` sleeps on a futex (Windows: an event) while the ring is empty. `crd_notify` costs one memory fence and enters the kernel only if the reader is actually asleep.
 - **Robust against the peer.** The reader validates every record header, so a buggy or hostile writer cannot make it read outside the mapping. A crashed writer's slot is reclaimed automatically, and data it published stays readable.
 - **C and C++.** A C11 core, plus a C++17 header with RAII endpoints, typed writes, in-place construction (`try_emplace<T>`) and typed zero-copy reads (`msg.as<T>()`).
-- **Tooling:** `corundum-inspect` shows a ring's fill level and who is attached; `corundum-bench` compares against a pipe and a Unix socket on your machine.
+- **Checked binary layouts.** `corundum/wire.h` rejects padded or misaligned structs at compile time, so a record can be read in place by any process that includes the same header. See [docs/WIRE.md](docs/WIRE.md).
+- **Tooling:** `corundum-inspect` shows a ring's fill level and who is attached; `corundum-bench` measures round-trip, one-way and per-call latency and throughput, against a pipe and a Unix socket, on your machine.
 
 ## Quick start
 
@@ -134,47 +144,75 @@ All functions return a `crd_status`; negative values are errors and `crd_strerro
 
 ## Benchmarks
 
-`corundum-bench` runs every test between two processes pinned to separate cores. Latency is a 64-byte ping-pong (one-way = round trip / 2). Throughput is a one-way stream in which the producer writes every byte and the consumer touches every cache line.
+`corundum-bench` runs every cross-process test between two processes pinned to separate cores, with 64-byte messages:
+
+- **latency** — ping-pong: process A writes, process B echoes, A measures the round trip. Reported as the round trip and as round trip / 2.
+- **oneway** — the writer stamps each packet with the CPU cycle counter just before committing it; the reader in the other process reads the counter right after `crd_read` returns. The writer sends the next packet only after the previous one is released, so there is never a queue. This needs a counter that is synchronised across cores (the invariant TSC on a single-socket x86-64 machine, the generic timer on arm64); the benchmark counts any sample whose receive time is earlier than its send time.
+- **ops** — writes and reads in one thread, so no cache line moves between cores: the instruction cost of `reserve + fill + commit` and `read + use + release`.
+- **throughput** — a one-way stream in which the producer writes every byte and the consumer touches every cache line.
+
+Every hot loop also reports how often the operating system switched the thread out (Linux: `getrusage`, voluntary and involuntary; Windows: the thread's context-switch counter). These are read before and after the loop, never inside it. Raw output of every run quoted here is in [docs/bench/](docs/bench/).
 
 ### Windows 11, bare metal
 
-Intel Core i9-9900K, Windows 11, MinGW-w64 GCC 15, Release build, `corundum-bench all -n 1000000 -c 2,4`. The comparison is an anonymous pipe (`CreatePipe`):
+Intel Core i9-9900K, Windows 11, MinGW-w64 GCC 15, Release build, `corundum-bench all -n 1000000 -c 2,4` and two more runs of the latency modes. Ranges are over the three runs.
 
-| One-way latency, 64 B | p50 | p99 | p99.9 |
+| 64-byte message | p50 | p99 | p99.9 |
 |---|---:|---:|---:|
-| Corundum | 74 ns | 114 ns | 126 ns |
-| pipe | 6.7 µs | 10.6 µs | 38.7 µs |
+| Corundum round trip | 151–154 ns | 214–224 ns | 273–296 ns |
+| Corundum round trip / 2 | **76 ns** | 107–112 ns | 137–148 ns |
+| Corundum one-way, measured directly | 93–97 ns | 129–133 ns | 164–245 ns |
+| pipe (`CreatePipe`) round trip / 2, first run | 7.3 µs | 205 µs | 2.4 ms |
+
+| Hot-path cost, one thread, 64-byte packet | ns per packet |
+|---|---:|
+| write: `reserve` + fill + `commit` | 8.0–8.2 |
+| read: `read` + use + `release` | 4.5–4.8 |
+| write and read the same packet | 8.7–9.2 |
 
 | Throughput | 16 B | 64 B | 256 B | 1 KiB | 4 KiB |
 |---|---:|---:|---:|---:|---:|
-| Corundum, M msg/s | 165 | 193 | 93 | 25.5 | 6.0 |
-| Corundum, GB/s | 2.7 | 12.3 | 23.8 | 26.2 | 24.6 |
-| pipe, GB/s | 0.01 | 0.05 | 0.21 | 0.44 | 1.4 |
+| Corundum, M msg/s | 154 | 168 | 86 | 22.3 | 5.3 |
+| Corundum, GB/s | 2.5 | 10.8 | 21.9 | 22.8 | 21.7 |
+| pipe, GB/s | < 0.01 | 0.02 | 0.10 | 0.32 | 1.1 |
 
-Median latency is about 90 times lower than the pipe's; throughput for 64-byte messages is about 230 times higher.
+**No system calls on the hot path.** The hot path is inline code in the header that makes no system calls. Over one million ping-pong round trips (about 0.19 s of spinning) the pinging thread was switched out 0, 2 and 14 times in the three runs. Those switches are the Windows scheduler preempting a busy thread, not calls into the kernel, and they produce the rare millisecond-scale maxima in the raw output.
 
 ### Linux (WSL2)
 
-Measured on the same i9-9900K under **WSL2** (Ubuntu, kernel 6.18, GCC 15, Release build `-O3`), `corundum-bench all -n 1000000 -c 2,4`:
+The same i9-9900K under **WSL2** (Ubuntu, kernel 6.18, GCC 15, Release build `-O3`), the same commands:
 
-| One-way latency, 64 B | p50 | p99 | p99.9 |
+| 64-byte message | p50 | p99 | p99.9 |
 |---|---:|---:|---:|
-| Corundum | 25–75 ns | 105 ns | 120–150 ns |
-| pipe | 21.9 µs | 37.0 µs | 63.7 µs |
-| Unix socket | 20.5 µs | 40.7 µs | 66.8 µs |
+| Corundum round trip | 144–163 ns | 219–227 ns | 277–295 ns |
+| Corundum round trip / 2 | 72–81 ns | 110–114 ns | 139–148 ns |
+| Corundum one-way, measured directly | 91–94 ns | 120–125 ns | 3.7–6.8 µs |
+| pipe round trip / 2, first run | 21.7 µs | 41.0 µs | 78.0 µs |
+| Unix socket round trip / 2, first run | 20.2 µs | 44.9 µs | 83.9 µs |
+
+| Hot-path cost, one thread, 64-byte packet | ns per packet |
+|---|---:|
+| write: `reserve` + fill + `commit` | 8.3–8.5 |
+| read: `read` + use + `release` | 4.4–4.6 |
+| write and read the same packet | 8.4–8.7 |
 
 | Throughput | 16 B | 64 B | 256 B | 1 KiB | 4 KiB |
 |---|---:|---:|---:|---:|---:|
-| Corundum, M msg/s | 188 | 170 | 84 | 21.3 | 5.7 |
-| Corundum, GB/s | 3.0 | 10.9 | 21.5 | 21.9 | 23.5 |
-| pipe, GB/s | 0.07 | 0.28 | 0.97 | 3.0 | 6.1 |
-| Unix socket, GB/s | 0.03 | 0.11 | 0.43 | 1.6 | 3.8 |
+| Corundum, M msg/s | 192 | 167 | 89 | 25.9 | 5.8 |
+| Corundum, GB/s | 3.1 | 10.7 | 22.8 | 26.5 | 23.7 |
+| pipe, GB/s | 0.08 | 0.31 | 1.0 | 3.0 | 6.2 |
+| Unix socket, GB/s | 0.03 | 0.11 | 0.42 | 1.5 | 4.0 |
+
+In every Corundum hot loop of all three runs (ping-pong, both sides of the one-way test, the single-thread test) Linux counted **0 voluntary context switches**: the threads never blocked in the kernel. Involuntary switches (preemption by the scheduler) were between 0 and 4 per loop.
 
 How to read these numbers:
 
-- WSL2 is a virtual machine. Its vCPUs do not map to fixed physical cores, so the Corundum p50 moved between 25 and 75 ns from run to run. The pipe and socket figures include the hypervisor's wake-up cost and are several times worse than on bare metal, where a pipe round trip is typically a few microseconds. Run the benchmark on your own hardware before relying on any number.
-- Corundum's latency is essentially the time to move two cache lines between cores; the pipe and socket latency is dominated by waking the blocked process. Corundum's readers in this test busy-poll; a reader using `crd_wait` pays a futex wake-up when it sleeps, which is comparable to a pipe.
-- CI runs the benchmark on GitHub's x86-64 and arm64 runners on every push (shared VMs, so treat their numbers as a smoke test).
+- **Round trip / 2 is the figure to compare with other IPC benchmarks**, and on bare-metal Windows it is 76 ns at the median (1.1.0 reported 74 ns). It assumes both directions cost the same.
+- **The directly measured one-way latency is higher, 91–97 ns.** It includes reading the cycle counter on both cores (with fences, so the reads stay in order), and every packet starts from an idle ring. Both figures are real; they measure slightly different things.
+- **The hot-path calls cost about 8 ns to write and 4.5 ns to read a 64-byte packet** when no cache line has to move. Almost all of the cross-process latency is the cache-coherence transfer between cores, which no software design can avoid.
+- WSL2 is a virtual machine: its vCPUs do not map to fixed physical cores, minima as low as 16 ns there are not physically meaningful, and the one-way p99.9 shows hypervisor interruptions. The pipe and socket figures include the hypervisor's wake-up cost. A bare-metal Linux measurement has not been done.
+- Corundum's readers in these tests busy-poll. A reader that sleeps in `crd_wait` pays a futex (Windows: event) wake-up, which is comparable to a pipe; that path is not benchmarked here.
+- CI runs the benchmark on GitHub's x86-64, arm64 and Windows runners on every push (shared VMs, so treat their numbers as a smoke test).
 
 ## Guarantees and limits
 
@@ -205,10 +243,31 @@ In your project: `find_package(Corundum REQUIRED)` and `target_link_libraries(ap
 | Suite | What it covers |
 |---|---|
 | `test_ring` (907 checks on Linux, 905 on Windows) | Argument validation, foreign or half-initialised segments, exclusive roles and stale-owner recovery, full/empty boundaries, maximum-size records at every wrap position, staging, 400 000 random interleaved operations, corruption detection, close and timeout semantics |
+| `test_layout` | Cache-line separation: compile-time and run-time checks that metadata, producer-written and consumer-written fields sit in separate 128-byte blocks (so also on separate 64-byte lines); page-aligned mappings and 8-byte-aligned records. Write sets: snapshots of the header around each hot-path call prove the producer writes only its block, the consumer only its block, and the reader never writes into the data region. Overflow: the ring filled to `CRD_FULL` for 133 record sizes (0 to 2040 bytes) from 3 start offsets each; every refusal is a real full condition, changes nothing, and every record reads back intact. Positions: 4 000 operations across the 2^64 wrap of both 64-bit positions |
+| `test_concurrency` | A producer and a consumer thread on one shared mapping: 3.5 million variable-size records through a tiny ring (constantly full), a ring of maximum-size records and a large batched ring, every byte verified. Under ThreadSanitizer it checks the acquire/release pairing on `head` and `tail` |
 | `test_ipc` | 3 million variable-size records between two processes, every byte verified; 20 000 records to a sleeping reader with no lost wake-ups; a writer killed mid-stream (`SIGKILL` / `TerminateProcess`) |
+| `test_wire`, `test_wire_cpp` | Binary layouts: the expected bytes of a quote built by hand and compared with what the reader sees in the ring at every buffer offset; typed views refuse records of the wrong size; the same layouts from C++ with `try_emplace` and `as<T>()` |
+| `wire_compile_fail_0..7` | Seven programs with a padded, misaligned, over-aligned, incompletely listed, resized or shifted struct must fail to compile; the control program must compile |
 | `test_cpp` | The C++ wrapper: typed and in-place writes, typed reads, move semantics, exceptions, a producer thread with `wait` |
 
-`scripts/check.sh` runs everything with GCC (`-Werror`) and again with Clang under AddressSanitizer and UndefinedBehaviorSanitizer. CI repeats this on Linux x86-64 and **arm64** (whose weaker memory model is where a missing acquire or release would show up) and runs the whole suite on **Windows** with MinGW-w64.
+`scripts/check.sh` runs everything with GCC (`-Werror`), again with Clang under AddressSanitizer and UndefinedBehaviorSanitizer, and runs the threaded tests under ThreadSanitizer. CI repeats this on Linux x86-64 and **arm64** (whose weaker memory model is where a missing acquire or release would show up) and runs the whole suite on **Windows** with MinGW-w64.
+
+### What has been verified, and what has not
+
+Verified for 1.2.0:
+
+- Builds without warnings (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror`) and passes all 15 CTest entries with GCC 15 and Clang 21 on Linux (WSL2) and with MinGW-w64 GCC 15 on Windows 11; ASan + UBSan and TSan runs are clean.
+- The concurrency test detects broken memory ordering: changing any one of the four orderings (publish store of `head`, release store of `tail`, the reader's load of `head`, the writer's load of `tail`) from release/acquire to relaxed makes ThreadSanitizer report a data race. This mutation check was run by hand; it is not part of CI.
+- Each side's hot path writes only its own cache-line block (`test_layout`).
+- In the benchmark hot loops Linux counted no voluntary context switches, so the threads never blocked in the kernel. The benchmark numbers above come from one machine, an i9-9900K.
+
+Not verified:
+
+- No bare-metal Linux numbers, no AMD or other Intel CPUs, no multi-socket machines. On a multi-socket machine the TSC may not be synchronised across sockets, and the `oneway` mode would then be invalid (it reports samples that arrive "before" they were sent).
+- arm64 is tested only on GitHub's CI runners; nothing was measured on arm64 hardware. Windows on arm64 has not been tested at all.
+- The absence of false sharing is shown structurally (field offsets and the bytes each side writes), not with hardware counters (for example `perf c2c`).
+- "No system calls on the hot path" is established from the code and the context-switch counts; system calls were not traced (`strace`, ETW). Non-blocking system calls would not show up as context switches; the hot-path functions contain none.
+- The `crd_wait` / `crd_notify` sleeping path is tested for correctness (no lost wake-ups) but its latency is not benchmarked.
 
 ## How it works
 

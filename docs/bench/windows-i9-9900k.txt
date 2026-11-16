@@ -1,0 +1,57 @@
+Corundum 1.2.0, Intel Core i9-9900K, Windows 11 Pro 10.0.26200, MinGW-w64 GCC 15 (MSYS2), Release
+Command: corundum-bench all -n 1000000 -c 2,4, then two more runs of latency / oneway / ops
+Date: 2026-11-16
+
+Corundum 1.2.0 benchmark (Windows), 1000000 messages, pinned
+
+-- latency, 64-byte ping-pong between two processes --
+corundum round trip    min    107  p50    153  p99    214  p99.9     273  max  2819907  mean  163.3  ns
+corundum rtt / 2       min     53  p50     76  p99    107  p99.9     137  max  1409954  mean   81.6  ns
+  pinger  hot loop: 0 context switches, kernel 31.2 ms, user 171.9 ms
+pipe round trip        min   3331  p50  14646  p99 409700  p99.9 4710212  max 213378603  mean 33838.1  ns
+pipe rtt / 2           min   1666  p50   7323  p99 204850  p99.9 2355106  max 106689301  mean 16919.1  ns
+
+-- one-way latency, 64-byte packet, writer and reader in separate processes --
+corundum one-way       min     51  p50     96  p99    133  p99.9     245  max   294327  mean  100.0  ns
+  writer  hot loop: 14 context switches, kernel 31.2 ms, user 796.9 ms
+  reader  hot loop: 20 context switches, kernel 0.0 ms, user 843.8 ms
+
+-- hot-path cost, 64-byte packet, one thread --
+write  (reserve + fill + commit)    8.02 ns/packet
+read   (read + use + release)       4.56 ns/packet
+write + read of the same packet     8.72 ns/packet
+  ops     hot loop: 12 context switches, kernel 0.0 ms, user 437.5 ms
+
+-- throughput, one-way stream --
+corundum        16 B:   153.69 M msg/s     2.46 GB/s
+pipe            16 B:     0.31 M msg/s     0.00 GB/s
+corundum        64 B:   168.24 M msg/s    10.77 GB/s
+pipe            64 B:     0.25 M msg/s     0.02 GB/s
+corundum       256 B:    85.63 M msg/s    21.92 GB/s
+pipe           256 B:     0.41 M msg/s     0.10 GB/s
+corundum      1024 B:    22.30 M msg/s    22.84 GB/s
+pipe          1024 B:     0.31 M msg/s     0.32 GB/s
+corundum      4096 B:     5.28 M msg/s    21.65 GB/s
+pipe          4096 B:     0.27 M msg/s     1.09 GB/s
+
+-- run 2: latency / oneway / ops --
+corundum round trip    min    102  p50    151  p99    218  p99.9     280  max   439779  mean  158.2  ns
+corundum rtt / 2       min     51  p50     76  p99    109  p99.9     140  max   219889  mean   79.1  ns
+  pinger  hot loop: 2 context switches, kernel 0.0 ms, user 187.5 ms
+corundum one-way       min     51  p50     93  p99    129  p99.9     164  max  3021230  mean  103.6  ns
+  writer  hot loop: 17 context switches, kernel 15.6 ms, user 812.5 ms
+  reader  hot loop: 38 context switches, kernel 31.2 ms, user 796.9 ms
+write  (reserve + fill + commit)    7.99 ns/packet
+read   (read + use + release)       4.50 ns/packet
+write + read of the same packet     8.66 ns/packet
+
+-- run 3: latency / oneway / ops --
+corundum round trip    min    104  p50    153  p99    224  p99.9     296  max  1181381  mean  163.3  ns
+corundum rtt / 2       min     52  p50     76  p99    112  p99.9     148  max   590691  mean   81.7  ns
+  pinger  hot loop: 14 context switches, kernel 0.0 ms, user 187.5 ms
+corundum one-way       min     51  p50     97  p99    130  p99.9     169  max   929951  mean  102.3  ns
+  writer  hot loop: 5 context switches, kernel 0.0 ms, user 828.1 ms
+  reader  hot loop: 19 context switches, kernel 31.2 ms, user 796.9 ms
+write  (reserve + fill + commit)    8.21 ns/packet
+read   (read + use + release)       4.79 ns/packet
+write + read of the same packet     9.15 ns/packet
